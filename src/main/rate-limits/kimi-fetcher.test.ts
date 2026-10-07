@@ -3,10 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const netFetchMock = vi.hoisted(() => vi.fn())
 const fsState = vi.hoisted<{
+  config: string | null
   credentials: string | null
   readError: Error | null
   readPaths: string[]
 }>(() => ({
+  config: null,
   credentials: null,
   readError: null,
   readPaths: []
@@ -22,12 +24,13 @@ vi.mock('node:fs/promises', () => ({
     if (fsState.readError) {
       throw fsState.readError
     }
-    if (fsState.credentials === null) {
+    const content = String(path).endsWith('config.toml') ? fsState.config : fsState.credentials
+    if (content === null) {
       const error = new Error('ENOENT: no such file or directory') as NodeJS.ErrnoException
       error.code = 'ENOENT'
       throw error
     }
-    return fsState.credentials
+    return content
   }
 }))
 
@@ -61,6 +64,21 @@ function hostCredentialsPath(kimiHome: string): string {
   return join(kimiHome, 'credentials', 'kimi-code.json')
 }
 
+function hostConfigPath(kimiHome: string): string {
+  return join(kimiHome, 'config.toml')
+}
+
+// Global-region login as written by the CLI: scoped credentials slot + `.ai` endpoint.
+const GLOBAL_CONFIG = `
+[providers."managed:kimi-code"]
+base_url = "https://api.kimi.ai/coding/v1"
+
+[providers."managed:kimi-code".oauth]
+storage = "file"
+key = "oauth/kimi-code-env-0e4f99c69cc27850"
+oauth_host = "https://auth.kimi.ai"
+`
+
 function freshCredentials(): string {
   // expires_at far in the future (seconds).
   return JSON.stringify({ access_token: 'tok-abc', expires_at: 99_999_999_999 })
@@ -69,6 +87,7 @@ function freshCredentials(): string {
 describe('fetchKimiRateLimits', () => {
   beforeEach(() => {
     netFetchMock.mockReset()
+    fsState.config = null
     fsState.credentials = null
     fsState.readError = null
     fsState.readPaths = []
@@ -167,7 +186,10 @@ describe('fetchKimiRateLimits', () => {
     const result = await fetchKimiRateLimits()
 
     expect(result.status).toBe('ok')
-    expect(fsState.readPaths).toEqual([hostCredentialsPath('/home/test/.kimi-code')])
+    expect(fsState.readPaths).toEqual([
+      hostConfigPath('/home/test/.kimi-code'),
+      hostCredentialsPath('/home/test/.kimi-code')
+    ])
   })
 
   it('honors KIMI_CODE_HOME for the host home', async () => {
@@ -178,7 +200,10 @@ describe('fetchKimiRateLimits', () => {
     const result = await fetchKimiRateLimits()
 
     expect(result.status).toBe('ok')
-    expect(fsState.readPaths).toEqual([hostCredentialsPath('/custom/kimi-home')])
+    expect(fsState.readPaths).toEqual([
+      hostConfigPath('/custom/kimi-home'),
+      hostCredentialsPath('/custom/kimi-home')
+    ])
   })
 
   it('ignores a blank KIMI_CODE_HOME instead of reading from the process cwd', async () => {
@@ -188,6 +213,59 @@ describe('fetchKimiRateLimits', () => {
 
     await fetchKimiRateLimits()
 
-    expect(fsState.readPaths).toEqual([hostCredentialsPath('/home/test/.kimi-code')])
+    expect(fsState.readPaths).toEqual([
+      hostConfigPath('/home/test/.kimi-code'),
+      hostCredentialsPath('/home/test/.kimi-code')
+    ])
+  })
+
+  it('follows the credentials slot and endpoint recorded in config.toml', async () => {
+    fsState.config = GLOBAL_CONFIG
+    fsState.credentials = freshCredentials()
+    netFetchMock.mockResolvedValueOnce(jsonResponse(USAGE_RESPONSE))
+
+    const result = await fetchKimiRateLimits()
+
+    expect(result.status).toBe('ok')
+    expect(fsState.readPaths).toEqual([
+      hostConfigPath('/home/test/.kimi-code'),
+      join('/home/test/.kimi-code', 'credentials', 'kimi-code-env-0e4f99c69cc27850.json')
+    ])
+    expect(netFetchMock.mock.calls[0][0]).toBe('https://api.kimi.ai/coding/v1/usages')
+  })
+
+  it('keeps the default slot for the official login key', async () => {
+    fsState.config = GLOBAL_CONFIG.replace('kimi-code-env-0e4f99c69cc27850', 'kimi-code')
+    fsState.credentials = freshCredentials()
+    netFetchMock.mockResolvedValueOnce(jsonResponse(USAGE_RESPONSE))
+
+    await fetchKimiRateLimits()
+
+    expect(fsState.readPaths[1]).toBe(hostCredentialsPath('/home/test/.kimi-code'))
+  })
+
+  it('ignores a credentials key that would escape the credentials directory', async () => {
+    fsState.config = GLOBAL_CONFIG.replace(
+      'oauth/kimi-code-env-0e4f99c69cc27850',
+      'oauth/../../outside'
+    )
+    fsState.credentials = freshCredentials()
+    netFetchMock.mockResolvedValueOnce(jsonResponse(USAGE_RESPONSE))
+
+    await fetchKimiRateLimits()
+
+    expect(fsState.readPaths[1]).toBe(hostCredentialsPath('/home/test/.kimi-code'))
+  })
+
+  it('falls back to defaults when config.toml cannot be parsed', async () => {
+    fsState.config = 'not = [valid'
+    fsState.credentials = freshCredentials()
+    netFetchMock.mockResolvedValueOnce(jsonResponse(USAGE_RESPONSE))
+
+    const result = await fetchKimiRateLimits()
+
+    expect(result.status).toBe('ok')
+    expect(fsState.readPaths[1]).toBe(hostCredentialsPath('/home/test/.kimi-code'))
+    expect(netFetchMock.mock.calls[0][0]).toBe('https://api.kimi.com/coding/v1/usages')
   })
 })
