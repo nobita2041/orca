@@ -201,6 +201,9 @@ export async function fetchKimiRateLimits(options?: {
     return result('error', `WSL Kimi home unavailable for ${home.wslDistro ?? 'default distro'}`)
   }
   const connection = await readKimiConnection(home.path)
+  if ('error' in connection) {
+    return result('error', readErrorContext(home, connection.error))
+  }
   const readResult = await readKimiCredentials(home.path, connection.credentialsName)
   if (readResult.status === 'missing') {
     return result('unavailable', 'Not signed in to Kimi Code')

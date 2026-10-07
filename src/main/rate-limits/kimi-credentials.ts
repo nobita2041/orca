@@ -132,8 +132,14 @@ async function readFileBounded(path: string): Promise<FileReadResult> {
   }
 }
 
-export async function readKimiConnection(kimiHome: string): Promise<KimiConnection> {
+export async function readKimiConnection(
+  kimiHome: string
+): Promise<KimiConnection | { error: string }> {
   const config = await readFileBounded(joinKimiPath(kimiHome, 'config.toml'))
+  // Why: a timed-out read means an unreachable home; stop here instead of stalling on credentials too.
+  if (config.status === 'error') {
+    return { error: config.error }
+  }
   const parsed = config.status === 'ok' ? parseKimiConnection(config.raw) : {}
   return {
     credentialsName: parsed.credentialsName ?? DEFAULT_CREDENTIALS_NAME,

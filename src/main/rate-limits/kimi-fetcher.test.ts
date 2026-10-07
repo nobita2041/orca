@@ -268,4 +268,14 @@ describe('fetchKimiRateLimits', () => {
     expect(fsState.readPaths[1]).toBe(hostCredentialsPath('/home/test/.kimi-code'))
     expect(netFetchMock.mock.calls[0][0]).toBe('https://api.kimi.com/coding/v1/usages')
   })
+
+  it('stops after an unreadable config.toml instead of probing credentials', async () => {
+    fsState.readError = new Error('EACCES')
+
+    const result = await fetchKimiRateLimits()
+
+    expect(result.status).toBe('error')
+    expect(result.error).toMatch(/EACCES/)
+    expect(fsState.readPaths).toEqual([hostConfigPath('/home/test/.kimi-code')])
+  })
 })
